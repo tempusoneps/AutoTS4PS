@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "autots4ps"
+version = "1.0.0"
+authors = [
+  { name="TempusOnePs", email="magnus.damda@gmail.com" },
+]
+description = "Automated Time Series Forecasting"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Operating System :: OS Independent",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+]
+keywords = ["forecasting", "time series", "anomaly detection", "automated machine learning", "ckps"]
+dependencies = [
+    "numpy>=1.21.6",
+    "pandas>=2.0.0",
+    "statsmodels>=0.13.0",
+    "scikit-learn>=1.0.0",
+]
+[project.optional-dependencies]
+additional = [
+	"pytest>=7.0",
+	'tensorflow',
+	'xgboost>=1.6',
+	'lightgbm',
+	'scipy',
+	'arch',
+	'pytrends',
+	'matplotlib',
+	'requests',
+	'seaborn',
+]
+
+[project.urls]
+"Homepage" = "https://github.com/tempusoneps/AutoTS4PS"
+"Bug Tracker" = "https://github.com/tempusoneps/AutoTS4PS/issues"
+
