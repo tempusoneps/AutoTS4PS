@@ -1209,7 +1209,7 @@ class TemplateEvalObject(object):
         """Save results to a file.
 
         Args:
-            filename (str): *.pickle or *.csv. .pickle saves full results
+            filename (str): ``*.pickle`` or ``*.csv``. .pickle saves full results
         """
         if filename.endswith('.csv'):
             self.model_results.to_csv(filename, index=False)
@@ -1848,7 +1848,7 @@ horizontal_post_processors = [
         "fillna": "fake_date",
         "transformations": {
             "0": "AlignLastValue",
-            "2": "HistoricValues",
+            "1": "HistoricValues",
         },
         "transformation_params": {
             "0": {

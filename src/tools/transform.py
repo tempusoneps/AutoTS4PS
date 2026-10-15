@@ -184,14 +184,16 @@ def simple_context_slicer(df, method: str = "None", forecast_length: int = 30):
     Args:
         df (pandas.DataFrame): training data frame to slice
         method (str): Option to slice dataframe
-            'None' - return unaltered dataframe
-            'HalfMax' - return half of dataframe
-            'ForecastLength' - return dataframe equal to length of forecast
-            '2ForecastLength' - return dataframe equal to twice length of forecast
-                (also takes 4, 6, 8, 10 in addition to 2)
-            'n' - any integer length to slice by
-            '-n' - full length less this amount
-            "0.n" - this percent of the full data
+
+            - 'None' - return unaltered dataframe
+            - 'HalfMax' - return half of dataframe
+            - 'ForecastLength' - return dataframe equal to length of forecast
+            - '2ForecastLength' - return dataframe equal to twice length of forecast
+              (also takes 4, 6, 8, 10 in addition to 2)
+            - 'n' - any integer length to slice by
+            - '-n' - full length less this amount
+            - "0.n" - this percent of the full data
+
     """
     if method in [None, "None"]:
         return df
@@ -356,6 +358,8 @@ class Detrend(EmptyTransformer):
                         log=False, center_one=True, squared=False
                     )
                     Y = pd.DataFrame(self.trnd_trans.fit_transform(df)).to_numpy()
+                    if self.window is not None:
+                        Y = Y[-self.window :]
                 X = X.reshape((-1, 1))
                 self.trained_model.fit(X, Y)
         self.shape = df.shape
@@ -711,6 +715,8 @@ class SinTrend(EmptyTransformer):
 
         tt = np.array(tt)
         yy = np.array(yy)
+        if len(tt) < 4:
+            return {"amp": 0.0, "omega": 0.0, "phase": 0.0, "offset": np.mean(yy)}
         ff = np.fft.fftfreq(len(tt), (tt[1] - tt[0]))  # assume uniform spacing
         Fyy = abs(np.fft.fft(yy))
         guess_freq = abs(
@@ -753,6 +759,7 @@ class SinTrend(EmptyTransformer):
         X = pd.to_numeric(df.index, errors="coerce", downcast="integer").values
         # make this faster (250 columns in 2.5 seconds isn't bad, though)
         cols = df.columns.tolist()
+        parallel = True
         if self.n_jobs in [0, 1] or len(cols) < 100:
             parallel = False
         # joblib multiprocessing to loop through series
@@ -851,7 +858,7 @@ class PositiveShift(EmptyTransformer):
     Args:
         log (bool): whether to include a log transform.
         center_one (bool): whether to shift to 1 instead of 0.
-        squared (bool): whether to square (**2) values after shift.
+        squared (bool): whether to square (``**2``) values after shift.
     """
 
     def __init__(
@@ -1238,6 +1245,9 @@ class SeasonalDifference(EmptyTransformer):
             N = self.lag_1
             span = self.method
             num_slices = arr.shape[0] // N
+            if num_slices < 1:
+                arr = np.tile(arr, (int(np.ceil(N / arr.shape[0])), 1))[-N:]
+                num_slices = 1
             # (slices, lag size, num seriesd)
             arr_3d = arr[-(num_slices * N) :].reshape(num_slices, N, -1)
             alpha = 2 / (span + 1)
@@ -1712,7 +1722,7 @@ class DifferencedTransformer:
         """
         differenced = df.diff(self.lag)
         if self.fill == 'bfill':
-            return differenced.bfill()
+            return differenced.bfill().fillna(0)
         elif self.fill == 'zero':
             return differenced.fillna(0)
         elif self.fill == 'one':
@@ -2551,9 +2561,9 @@ class ScipyFilter(EmptyTransformer):
                 mysize = self.method_args.get("mysize", 3)
                 if isinstance(mysize, int):
                     mysize = (mysize, 1)
-            return pd.DataFrame(
-                wiener(df.values, mysize=mysize), columns=df.columns, index=df.index
-            )
+            filtered = wiener(df.values, mysize=mysize)
+            filtered = np.where(np.isfinite(filtered), filtered, df.values)
+            return pd.DataFrame(filtered, columns=df.columns, index=df.index)
         elif self.method == "savgol_filter":
             # args = [5, 2]
             return pd.DataFrame(
@@ -2717,7 +2727,7 @@ class FastICA(EmptyTransformer):
             "fun": random.choice(["logcosh", "exp", "cube"]),
             "max_iter": random.choices([100, 250, 500], [0.7, 0.2, 0.1])[0],
             "whiten": random.choices(
-                ['unit-variance', 'arbitrary-variance', False], [0.9, 0.1, 0.1]
+                ['unit-variance', 'arbitrary-variance'], [0.9, 0.1]
             )[0],
         }
 
@@ -2743,7 +2753,11 @@ class PCA(EmptyTransformer):
 
         self.columns = df.columns
         self.index = df.index
-        self.transformer = PCA(**self.kwargs)
+        kwargs = dict(self.kwargs)
+        n_comp = kwargs.get("n_components")
+        if isinstance(n_comp, int) and not isinstance(n_comp, bool):
+            kwargs["n_components"] = min(n_comp, min(df.shape))
+        self.transformer = PCA(**kwargs)
         return_df = self.transformer.fit_transform(df)
         if isinstance(return_df, pd.DataFrame):
             if return_df.shape[1] == len(self.columns):
@@ -3408,6 +3422,8 @@ class AlignLastValue(EmptyTransformer):
 
     @staticmethod
     def find_centerpoint(df, rows, lag, mean_type="arithmetic"):
+        # a lag longer than the history indexes off the front of the frame
+        lag = min(lag, df.shape[0])
         if rows <= 1:
             if lag > 1:
                 center = df.iloc[-lag, :]
@@ -3743,14 +3759,25 @@ class AnomalyRemoval(EmptyTransformer):
         return validated
 
     def transform(self, df):
+        anomaly_mask = self.anomalies == -1
+        if anomaly_mask.shape[1] == 1 and not anomaly_mask.columns.equals(df.columns):
+            # univariate output is one shared flag column; label alignment would
+            # otherwise match no data columns and silently remove nothing
+            anomaly_mask = pd.DataFrame(
+                np.repeat(anomaly_mask.to_numpy(), df.shape[1], axis=1),
+                index=anomaly_mask.index,
+                columns=df.columns,
+            )
+        anomaly_mask = anomaly_mask.reindex(
+            index=df.index, columns=df.columns, fill_value=False
+        )
         if self.fillna is not None:
             # Set anomalies to NaN, then fill them
-            df2 = df.copy()
-            df2[self.anomalies == -1] = np.nan
+            df2 = df.mask(anomaly_mask)
             df2 = FillNA(df2, method=self.fillna, window=10)
         else:
-            # Remove anomaly rows only if no fillna method specified
-            df2 = df[self.anomalies != -1]
+            # No fill method: anomalies are left as NaN
+            df2 = df.mask(anomaly_mask)
         return df2
 
     def fit_transform(self, df):
@@ -3864,14 +3891,17 @@ class HolidayTransformer(EmptyTransformer):
     def dates_to_holidays(
         self, dates, style="flag", holiday_impacts=False, max_features=365
     ):
-        """
-        dates (pd.DatetimeIndex): list of dates
-        style (str): option for how to return information
-            "long" - return date, name, series for all holidays in a long style dataframe
-            "impact" - returns dates, series with values of sum of impacts (if given) or joined string of holiday names
-            'flag' - return dates, holidays flag, (is not 0-1 but rather sum of input series impacted for that holiday and day)
-            'prophet' - return format required for prophet. Will need to be filtered on `series` for multivariate case
-            'series_flag' - dates, series 0/1 for if holiday occurred in any calendar
+        """Convert dates to holidays.
+
+        Args:
+            dates (pd.DatetimeIndex): list of dates
+            style (str): option for how to return information
+
+                - "long" - return date, name, series for all holidays in a long style dataframe
+                - "impact" - returns dates, series with values of sum of impacts (if given) or joined string of holiday names
+                - 'flag' - return dates, holidays flag, (is not 0-1 but rather sum of input series impacted for that holiday and day)
+                - 'prophet' - return format required for prophet. Will need to be filtered on `series` for multivariate case
+                - 'series_flag' - dates, series 0/1 for if holiday occurred in any calendar
         """
         if self.df_cols is None:
             return ValueError("HolidayTransformer has not yet been .fit()")
@@ -4079,6 +4109,7 @@ class LocalLinearTrend(EmptyTransformer):
             raise ValueError(f"rolling_window {self.rolling_window} arg is not valid")
         elif self.rolling_window < 1:
             self.rolling_window = int(self.rolling_window * len(self.dates))
+        self.rolling_window = int(min(max(self.rolling_window, 2), len(self.dates)))
 
         """
         if self.n_tails <= 0:
@@ -4589,6 +4620,7 @@ class LevelShiftMagic(EmptyTransformer):
         shift_remove_window (int): number of points to remove on each side of shift point (0, 1, or 2)
         shift_fillna (str): fillna method to use for gaps created by shift removal
         window_method (str): method for comparing forward and backward rolling windows
+
             - "overlap" (default): both windows include current point i, then subtract means
               backward=[i-N+1 to i], forward=[i to i+N-1], compare: rolling - rolling_forward
             - "exclusive": windows exclude current point with 1-point gap, then subtract means
@@ -4596,6 +4628,7 @@ class LevelShiftMagic(EmptyTransformer):
             - "diff_overlap": diff data first, then overlapping windows, detect when BOTH exceed threshold
               Apply diff first, then backward=[i-N+1 to i], forward=[i to i+N-1]
               Point i is a shift if BOTH rolling and rolling_forward independently exceed threshold in same direction
+
     """
 
     def __init__(
@@ -4803,7 +4836,7 @@ class LevelShiftMagic(EmptyTransformer):
         group_ids_np = group_ids.to_numpy()
         diff_abs_np = diff_abs.to_numpy()
         diff_mask_np = diff_mask.to_numpy()
-        max_mask_np = max_mask.to_numpy()
+        max_mask_np = max_mask.to_numpy(copy=True)
 
         # Initialize curr_diff_np
         used_groups_np = np.where(max_mask_np, group_ids_np, np.nan)
@@ -5048,7 +5081,7 @@ class LevelShiftMagic(EmptyTransformer):
         max_mask = diff_abs == maxes
 
         # Progressively identify level shifts
-        max_mask_np = max_mask.to_numpy()
+        max_mask_np = max_mask.to_numpy(copy=True)
         group_ids_np = group_ids.to_numpy()
         diff_abs_np = diff_abs.to_numpy()
         diff_mask_np = diff_mask.to_numpy()
@@ -5081,7 +5114,8 @@ class LevelShiftMagic(EmptyTransformer):
 
         # Store the shift mask - broadcast to all series in univariate mode
         self.shift_mask_ = pd.DataFrame(
-            np.broadcast_to(max_mask.values, (len(df), len(df.columns))),
+            # broadcast_to returns a read-only view; copy so downstream edits can't raise
+            np.broadcast_to(max_mask.values, (len(df), len(df.columns))).copy(),
             index=df.index,
             columns=df.columns,
         )
@@ -6759,6 +6793,9 @@ class FIRFilter(EmptyTransformer):
         selection = random.choices([True, False], [0.8, 0.2])[0]
         params = generate_random_fir_params(method=method)
         params["sampling_frequency"] = seasonal_int(include_one=False)
+        nyquist = params["sampling_frequency"] / 2
+        if params.get("cutoff_hz", 0) >= nyquist:
+            params["cutoff_hz"] = round(nyquist * 0.9, 6)
         params["on_transform"] = selection
         params["on_inverse"] = not selection
         if not selection:
@@ -7623,7 +7660,7 @@ class ReconciliationTransformer(EmptyTransformer):
         if no hierarchy_map is provided.
     hierarchy_map : dict or None
         If provided, describes aggregator sums for top/middle levels. E.g.,
-          { "TOP": ["A","B","C","D"], "MID1":["A","B"], "MID2":["C","D"] }.
+        ``{ "TOP": ["A","B","C","D"], "MID1":["A","B"], "MID2":["C","D"] }``.
         If None, automatically creates groups of size group_size plus a single "TOP".
     reconciliation_params : dict
         Dict of parameters for reconciliation. Structure:
@@ -8239,7 +8276,7 @@ class GeneralTransformer(object):
                 * by default 'forecast' is expected, 'original' can be set in trans_method
 
     Args:
-        fillNA (str): - method to fill NA, passed through to FillNA()
+        fillNA (str): method to fill NA, passed through to FillNA()
             'ffill' - fill most recent non-na value forward until another non-na value is reached
             'zero' - fill with zero. Useful for sales and other data where NA does usually mean $0.
             'mean' - fill all missing values with the series' overall average value
@@ -8251,7 +8288,7 @@ class GeneralTransformer(object):
             'IterativeImputer' - sklearn iterative imputer
             most of the interpolate methods from pandas.interpolate
 
-        transformations (dict): - transformations to apply {0: "MinMaxScaler", 1: "Detrend", ...}
+        transformations (dict): transformations to apply {0: "MinMaxScaler", 1: "Detrend", ...}
             'None'
             'MinMaxScaler' - Sklearn MinMaxScaler
             'PowerTransformer' - Sklearn PowerTransformer
@@ -8483,7 +8520,7 @@ class GeneralTransformer(object):
                 quants = int(df.shape[0] / 10)
             else:
                 quants = quants if df.shape[0] > quants else int(df.shape[0] / 3)
-            param["n_quantiles"] = quants
+            param["n_quantiles"] = max(1, quants)
             return QuantileTransformer(copy=True, **param)
 
         elif transformation == "StandardScaler":
@@ -8515,15 +8552,13 @@ class GeneralTransformer(object):
             )
 
         elif transformation == "FastICA":
-            from sklearn.decomposition import FastICA
-
             if df.shape[1] > 5000:
                 raise ValueError("FastICA fails with > 5000 series for speed reasons")
-            return FastICA(
-                n_components=df.shape[1],
-                random_state=random_seed,
-                **param,
-            )
+            # the module's wrapper class (not the raw sklearn estimator): sklearn
+            # silently caps n_components at n_samples, and the raw estimator then
+            # returns fewer columns than _fit_one rebuilds with. Same reason the
+            # PCA branch above was retired.
+            return FastICA(**{"random_state": random_seed, **(param or {})})
 
         elif transformation in ["RollingMean", "FixedRollingMean"]:
             param = 10 if param is None else param
@@ -8815,7 +8850,7 @@ transformer_dict = {
     "LevelShiftTransformer": 0.03,
     "CenterSplit": 0.01,
     "FFTFilter": 0.01,
-    "FFTDecomposition": 0.01,
+    "FFTDecomposition": 0.005,  # slow: ~3.9s median vs ~0.01s typical
     "ReplaceConstant": 0.02,
     "AlignLastDiff": 0.01,
     "DiffSmoother": 0.005,

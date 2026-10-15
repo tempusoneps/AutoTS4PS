@@ -36,8 +36,14 @@ try:
         """
 
         def fit(self, X, y, **kwargs):
+            """Fit, lowering min_samples only when the sklearn default would fail."""
             if self.min_samples is None and X.shape[1] + 1 > X.shape[0]:
+                # restore after fit so get_params()/clone() still see the user value
                 self.min_samples = max(2, X.shape[0] // 2)
+                try:
+                    return super().fit(X, y, **kwargs)
+                finally:
+                    self.min_samples = None
             return super().fit(X, y, **kwargs)
 
 except Exception:
@@ -1851,7 +1857,7 @@ class RollingRegression(ModelObject):
             features = pd.DataFrame(transformed, index=features.index)
             features = features.replace([np.inf, -np.inf], 0).fillna(0)
         elif isinstance(features, pd.DataFrame):
-            features = features.replace([np.inf, -np.inf], 0)
+            features = features.replace([np.inf, -np.inf], 0).fillna(0)
         if isinstance(features, pd.DataFrame):
             features.columns = [str(col) for col in features.columns]
         return features
@@ -1979,6 +1985,18 @@ class RollingRegression(ModelObject):
                 index=[forecast_idx],
                 columns=history.columns,
             )
+            # RadiusNeighbors emits NaN when no neighbors are found
+            arr = rf_pred.to_numpy(dtype=float)
+            if not np.isfinite(arr).all():
+                bad = ~np.isfinite(arr)
+                fill = np.nan_to_num(
+                    history.iloc[-1].to_numpy(dtype=float),
+                    nan=0.0,
+                    posinf=0.0,
+                    neginf=0.0,
+                )
+                arr[bad] = np.broadcast_to(fill, arr.shape)[bad]
+                rf_pred = pd.DataFrame(arr, index=rf_pred.index, columns=rf_pred.columns)
             forecasts.append(rf_pred.copy())
             history = pd.concat([history, rf_pred], axis=0)
 
@@ -3817,8 +3835,8 @@ class VectorizedMultiOutputGPR:
         kernel (str): linear, polynomial, rbf, periodic, locally_periodic, exponential
         noise_var (float): noise variance, effectively regularization. Close to zero little regularization, larger values create more model flexiblity and noise tolerance.
         gamma: For the RBF, Exponential, and Locally Periodic kernels, γ is essentially an inverse length scale. [0.1,1,10,100].
-        lambda_: For the Periodic and Locally Periodic kernels, lambda_ determines the smoothness of the periodic function. A reasonable range might be [0.1,1,10,100].
-        lambda_prime: Specifically for the Locally Periodic kernel, this determines the smoothness of the periodic component. Same range as lambda_.
+        lambda_: For the Periodic and Locally Periodic kernels, ``lambda_`` determines the smoothness of the periodic function. A reasonable range might be [0.1,1,10,100].
+        lambda_prime: Specifically for the Locally Periodic kernel, this determines the smoothness of the periodic component. Same range as ``lambda_``.
         p: The period parameter for the Periodic and Locally Periodic kernels such as 7 or 365.25 for daily data.
     """
 
@@ -4115,7 +4133,8 @@ class PreprocessingRegression(ModelObject):
 
         full_end = df.shape[0] - 1
         window_end = full.shape[0] - 1
-        max_hist_rev = df.shape[0] - max_history if max_history != 0 else 0
+
+        max_hist_rev = max(0, df.shape[0] - max_history) if max_history != 0 else 0
 
         if one_step:
             self.X = full[:-1].reshape(-1, full.shape[-1])

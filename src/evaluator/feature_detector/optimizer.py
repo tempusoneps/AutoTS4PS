@@ -10,6 +10,12 @@ import json
 import time
 import warnings
 
+from .components.joint_trend import (
+    JOINT_TREND_METHOD,
+    mutate_joint_trend_changepoint_params,
+    sample_joint_trend_changepoint_params,
+)
+
 
 def _get_detector_class():
     """Lazy import to avoid circular dependency."""
@@ -142,6 +148,7 @@ class FeatureDetectionOptimizer:
             'standardize': detector.standardize,
             'smoothing_window': detector.smoothing_window,
             'extended_anomaly_params': copy.deepcopy(detector.extended_anomaly_params),
+            'seasonality_trend_prior': detector.seasonality_trend_prior,
         }
 
     def _record_evaluation(
@@ -382,6 +389,7 @@ class FeatureDetectionOptimizer:
                 'standardize',
                 'smoothing_window',
                 'extended_anomaly_params',
+                'seasonality_trend_prior',
             ),
         )
 
@@ -1674,6 +1682,8 @@ class FeatureDetectionOptimizer:
 
         if not params or rng.random() < 0.12:
             return ChangepointDetector.get_new_params(method='random')
+        if params.get('method') == JOINT_TREND_METHOD:
+            return mutate_joint_trend_changepoint_params(params, rng)
 
         mutated = copy.deepcopy(params)
         method_params = copy.deepcopy(mutated.get('method_params', {}))
@@ -1864,9 +1874,10 @@ class FeatureDetectionOptimizer:
         Curriculum Learning (sigma annealing)
             Three stages with decreasing sigma drive the search from coarse to
             fine sensitivity:
-              Stage 1: sigma=14 days — wide window builds initial recall
-              Stage 2: sigma=7 days  — medium window matches ±7-day tolerance
-              Stage 3: sigma=3.5 days — tight window polishes placement precision
+
+            - Stage 1: sigma=14 days — wide window builds initial recall
+            - Stage 2: sigma=7 days  — medium window matches ±7-day tolerance
+            - Stage 3: sigma=3.5 days — tight window polishes placement precision
 
         Parameters
         ----------
@@ -2061,6 +2072,9 @@ class FeatureDetectionOptimizer:
                 'autoencoder',
                 'multiresolution',
             ]
+        # The detector-level joint method is not a ChangepointDetector method,
+        # so it is added here explicitly to be considered by the sweep.
+        all_cp_methods = all_cp_methods + [JOINT_TREND_METHOD]
         diversity_methods = [
             m
             for m in all_cp_methods
@@ -2069,7 +2083,10 @@ class FeatureDetectionOptimizer:
         for sweep_method in diversity_methods:
             sweep_candidate = copy.deepcopy(best_params)
             try:
-                sweep_cp = ChangepointDetector.get_new_params(method='random')
+                if sweep_method == JOINT_TREND_METHOD:
+                    sweep_cp = sample_joint_trend_changepoint_params(rng)
+                else:
+                    sweep_cp = ChangepointDetector.get_new_params(method='random')
                 # Force the method to the sweep target.
                 sweep_cp['method'] = sweep_method
                 sweep_cp['aggregate_method'] = 'individual'
@@ -2129,6 +2146,8 @@ class FeatureDetectionOptimizer:
                 fresh_cp = self._local_mutate_changepoint_params(
                     candidate.get('changepoint_params', {}), rng
                 )
+            elif rng.random() < 0.12:
+                fresh_cp = sample_joint_trend_changepoint_params(rng)
             else:
                 fresh_cp = ChangepointDetector.get_new_params(method='random')
             # If the sampled method is excluded, resample randomly.
