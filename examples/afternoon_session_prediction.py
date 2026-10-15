@@ -16,9 +16,36 @@ SRC_DIR = os.path.join(PROJECT_ROOT, "src")
 if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
 
-from tools.halfday_data import load_and_resample_halfday
-from tools.decision_engine import evaluate_decision
-from models.afternoon_autots import build_afternoon_model
+try:
+    from autots.tools.halfday_data import load_and_resample_halfday
+    from autots.tools.decision_engine import evaluate_decision
+    from autots.models.afternoon_autots import build_afternoon_model
+except ImportError:
+    try:
+        from tools.halfday_data import load_and_resample_halfday
+        from tools.decision_engine import evaluate_decision
+        from models.afternoon_autots import build_afternoon_model
+    except ImportError:
+        AUTOTS_DIR = os.path.join(SRC_DIR, "autots")
+        if AUTOTS_DIR not in sys.path:
+            sys.path.insert(0, AUTOTS_DIR)
+        from tools.halfday_data import load_and_resample_halfday
+        from tools.decision_engine import evaluate_decision
+        from models.afternoon_autots import build_afternoon_model
+
+def resolve_csv_path(path: str) -> str:
+    if os.path.exists(path):
+        return path
+    candidates = [
+        os.path.join(PROJECT_ROOT, path),
+        os.path.join(PROJECT_ROOT, "datasets", os.path.basename(path)),
+        os.path.join(PROJECT_ROOT, "datasets", "VN30F1M_5m_train.csv") if "train" in path else "",
+        os.path.join(PROJECT_ROOT, "datasets", "VN30F1M_5m_test.csv") if "test" in path else "",
+    ]
+    for c in candidates:
+        if c and os.path.exists(c):
+            return c
+    return path
 
 def print_banner(title: str):
     print("=" * 80)
@@ -29,8 +56,9 @@ def run_advisor(csv_path: str, target_date: str = None, fast_mode: bool = False)
     """
     Simulates midday 11:30 decision for a specific date (or the latest available date).
     """
+    csv_path = resolve_csv_path(csv_path)
     print_banner("BẢN TIN KHUYẾN NGHỊ GIAO DỊCH PHIÊN CHIỀU (LUNCHTIME ADVISOR)")
-    print("Loading and preparing half-day dataset...")
+    print(f"Loading and preparing half-day dataset from: {os.path.basename(csv_path)}...")
     df_halfday, df_features = load_and_resample_halfday(csv_path)
 
     # Find candidate morning bar
@@ -142,7 +170,8 @@ def run_backtest(csv_path: str, n_days: int = 15, fast_mode: bool = True):
     """
     Runs walk-forward backtest across the last N test days.
     """
-    print_banner(f"CHẠY WALK-FORWARD BACKTEST {n_days} PHIÊN GẦN NHẤT")
+    csv_path = resolve_csv_path(csv_path)
+    print_banner(f"CHẠY WALK-FORWARD BACKTEST {n_days} PHIÊN GẦN NHẤT ({os.path.basename(csv_path)})")
     df_halfday, df_features = load_and_resample_halfday(csv_path)
     
     unique_days = df_halfday['day_str'].unique()
