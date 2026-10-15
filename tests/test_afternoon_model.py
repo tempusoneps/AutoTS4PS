@@ -5,7 +5,10 @@ import sys
 # Ensure src is in sys.path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'src')))
 
-from models.afternoon_autots import build_afternoon_model
+try:
+    from autots.models.afternoon_autots import build_afternoon_model
+except ImportError:
+    from models.afternoon_autots import build_afternoon_model
 
 class TestAfternoonModelBuilder(unittest.TestCase):
     def test_model_initialization(self):

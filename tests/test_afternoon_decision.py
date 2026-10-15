@@ -5,7 +5,10 @@ import os
 # Ensure src is in sys.path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'src')))
 
-from tools.decision_engine import evaluate_decision
+try:
+    from autots.tools.decision_engine import evaluate_decision
+except ImportError:
+    from tools.decision_engine import evaluate_decision
 
 class TestDecisionEngine(unittest.TestCase):
     def setUp(self):

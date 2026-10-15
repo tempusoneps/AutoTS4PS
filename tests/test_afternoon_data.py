@@ -8,7 +8,10 @@ import sys
 # Ensure src is in sys.path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'src')))
 
-from tools.halfday_data import load_and_resample_halfday
+try:
+    from autots.tools.halfday_data import load_and_resample_halfday
+except ImportError:
+    from tools.halfday_data import load_and_resample_halfday
 
 class TestAfternoonData(unittest.TestCase):
     def setUp(self):

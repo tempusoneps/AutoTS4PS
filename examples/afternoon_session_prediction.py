@@ -39,8 +39,8 @@ def resolve_csv_path(path: str) -> str:
     candidates = [
         os.path.join(PROJECT_ROOT, path),
         os.path.join(PROJECT_ROOT, "datasets", os.path.basename(path)),
-        os.path.join(PROJECT_ROOT, "datasets", "VN30F1M_5m_train.csv") if "train" in path else "",
-        os.path.join(PROJECT_ROOT, "datasets", "VN30F1M_5m_test.csv") if "test" in path else "",
+        os.path.join(PROJECT_ROOT, "datasets", "train.csv") if "train" in path else "",
+        os.path.join(PROJECT_ROOT, "datasets", "test.csv") if "test" in path else "",
     ]
     for c in candidates:
         if c and os.path.exists(c):
