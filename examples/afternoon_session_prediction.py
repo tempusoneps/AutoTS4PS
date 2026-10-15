@@ -58,8 +58,14 @@ def run_advisor(csv_path: str, target_date: str = None, fast_mode: bool = False)
     print(f"📊 Nến Sáng: Close = {morning_bar['close']:.2f} | High = {morning_bar['high']:.2f} | Low = {morning_bar['low']:.2f} | Biên độ = {morning_bar['high'] - morning_bar['low']:.2f} điểm")
     print(f"⚡ VWAP Sáng: {morning_bar['vwap']:.2f} (Độ lệch: {morning_bar['vwap_dev']*100:.2f}%) | Vol Sáng: {int(morning_bar['volume']):,} HĐ")
     
-    print("\n⏳ AutoTS đang huấn luyện & tìm kiếm mô hình tối ưu (Fast Mode = {})...".format(fast_mode))
-    model = build_afternoon_model(fast_mode=fast_mode)
+    DEFAULT_TEMPLATE_PATH = os.path.join(SCRIPT_DIR, "best_afternoon_template.json")
+    if os.path.exists(DEFAULT_TEMPLATE_PATH):
+        print(f"\n⚡ Phát hiện template đã lưu: {os.path.basename(DEFAULT_TEMPLATE_PATH)}")
+        print("   -> Tự động nạp cấu hình và chạy Fast Inference trong ~1 giây...")
+        model = build_afternoon_model(template_path=DEFAULT_TEMPLATE_PATH)
+    else:
+        print(f"\n⏳ Chưa có file template -> AutoTS đang huấn luyện & tìm kiếm mô hình tối ưu (Fast Mode = {fast_mode})...")
+        model = build_afternoon_model(fast_mode=fast_mode)
     
     series_weights = {
         'VN30F1M': 100.0,
@@ -69,9 +75,17 @@ def run_advisor(csv_path: str, target_date: str = None, fast_mode: bool = False)
         'vol_ratio': 0.0,
     }
     
-    # Train
+    # Train / Fit
     model = model.fit(train_features, weights=series_weights)
     prediction = model.predict()
+    
+    # Tự động xuất template nếu chưa có để các lần chạy sau không cần train lại
+    if not os.path.exists(DEFAULT_TEMPLATE_PATH):
+        try:
+            model.export_template(DEFAULT_TEMPLATE_PATH, models="best")
+            print(f"💾 Đã tự động lưu cấu hình mô hình tối ưu vào: {os.path.basename(DEFAULT_TEMPLATE_PATH)}")
+        except Exception:
+            pass
     
     pred_point = float(prediction.forecast['VN30F1M'].iloc[0])
     upper_bound = float(prediction.upper_forecast['VN30F1M'].iloc[0])
@@ -149,6 +163,10 @@ def run_backtest(csv_path: str, n_days: int = 15, fast_mode: bool = True):
         'vol_ratio': 0.0,
     }
     
+    DEFAULT_TEMPLATE_PATH = os.path.join(SCRIPT_DIR, "best_afternoon_template.json")
+    if os.path.exists(DEFAULT_TEMPLATE_PATH):
+        print(f"⚡ Đã phát hiện template: {os.path.basename(DEFAULT_TEMPLATE_PATH)} -> Dùng Fast Inference cho toàn bộ các phiên backtest.")
+    
     for i, day in enumerate(test_days):
         print(f"\n[{i+1}/{n_days}] Kiểm thử ngày {day}...", end=" ")
         morning_idx = df_halfday[(df_halfday['day_str'] == day) & (df_halfday['session'] == 'morning')].index[0]
@@ -158,7 +176,10 @@ def run_backtest(csv_path: str, n_days: int = 15, fast_mode: bool = True):
         morning_bar = df_halfday.loc[morning_idx]
         afternoon_bar = df_halfday.loc[afternoon_idx]
         
-        model = build_afternoon_model(fast_mode=fast_mode)
+        if os.path.exists(DEFAULT_TEMPLATE_PATH):
+            model = build_afternoon_model(template_path=DEFAULT_TEMPLATE_PATH)
+        else:
+            model = build_afternoon_model(fast_mode=fast_mode)
         try:
             model = model.fit(train_features, weights=series_weights)
             prediction = model.predict()

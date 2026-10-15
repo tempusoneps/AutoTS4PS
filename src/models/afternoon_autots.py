@@ -1,11 +1,14 @@
 """
 Custom AutoTS Configuration for VN30F1M Afternoon Sessions.
 """
+import os
 from autots import AutoTS
 
-def build_afternoon_model(fast_mode: bool = False) -> AutoTS:
+def build_afternoon_model(fast_mode: bool = False, template_path: str = None) -> AutoTS:
     """
     Initializes AutoTS with directional metrics and causal whitelist transformers.
+    If template_path is provided and exists, imports the template with max_generations=0
+    for fast inference without running the genetic search.
     """
     financial_transformer_list = {
         "DifferencedTransformer": 0.30,
@@ -35,10 +38,11 @@ def build_afternoon_model(fast_mode: bool = False) -> AutoTS:
         "BallTreeMultivariateMotif",
     ]
 
-    max_generations = 5 if fast_mode else 15
-    num_validations = 1 if fast_mode else 2
+    use_template = template_path is not None and os.path.exists(template_path)
+    max_generations = 0 if use_template else (5 if fast_mode else 15)
+    num_validations = 0 if use_template else (1 if fast_mode else 2)
 
-    return AutoTS(
+    model = AutoTS(
         forecast_length=1,
         frequency="infer",
         prediction_interval=0.90,
@@ -53,3 +57,8 @@ def build_afternoon_model(fast_mode: bool = False) -> AutoTS:
         n_jobs="auto",
         verbose=0
     )
+
+    if use_template:
+        model.import_template(template_path, method="only")
+
+    return model

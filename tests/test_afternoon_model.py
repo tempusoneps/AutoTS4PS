@@ -32,5 +32,10 @@ class TestAfternoonModelBuilder(unittest.TestCase):
         self.assertEqual(model_full.max_generations, 15)
         self.assertEqual(model_full.num_validations, 2)
 
+    def test_template_mode_with_nonexistent_file(self):
+        # If file does not exist, fall back to normal fast mode
+        model = build_afternoon_model(fast_mode=True, template_path="nonexistent_template.json")
+        self.assertEqual(model.max_generations, 5)
+
 if __name__ == '__main__':
     unittest.main()
