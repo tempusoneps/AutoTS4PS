@@ -44,3 +44,6 @@ additional = [
 "Homepage" = "https://github.com/tempusoneps/AutoTS4PS"
 "Bug Tracker" = "https://github.com/tempusoneps/AutoTS4PS/issues"
 
+[tool.setuptools.package-dir]
+"autots" = "src"
+
