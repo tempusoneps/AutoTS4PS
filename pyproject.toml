@@ -3,7 +3,7 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "autots4ps"
+name = "autots"
 version = "1.0.0"
 authors = [
   { name="TempusOnePs", email="magnus.damda@gmail.com" },
@@ -25,6 +25,7 @@ dependencies = [
     "pandas>=2.0.0",
     "statsmodels>=0.13.0",
     "scikit-learn>=1.0.0",
+    "matplotlib>=3.11.2",
 ]
 [project.optional-dependencies]
 additional = [

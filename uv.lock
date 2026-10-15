@@ -72,10 +72,11 @@ wheels = [
 ]
 
 [[package]]
-name = "autots4ps"
+name = "autots"
 version = "1.0.0"
 source = { editable = "." }
 dependencies = [
+    { name = "matplotlib" },
     { name = "numpy" },
     { name = "pandas" },
     { name = "scikit-learn" },
@@ -100,6 +101,7 @@ additional = [
 requires-dist = [
     { name = "arch", marker = "extra == 'additional'" },
     { name = "lightgbm", marker = "extra == 'additional'" },
+    { name = "matplotlib", specifier = ">=3.11.2" },
     { name = "matplotlib", marker = "extra == 'additional'" },
     { name = "numpy", specifier = ">=1.21.6" },
     { name = "pandas", specifier = ">=2.0.0" },
