@@ -208,6 +208,8 @@ def evaluate_first_passage_risk(
     tp_pts: float = 7.0,
     sl_pts: float = 4.0,
     friction: float = 0.8,
+    trend_filter: bool = True,
+    strict_fp: bool = True,
 ) -> dict:
     """
     Finds K nearest historical morning analogs, evaluates first-passage paths for LONG & SHORT,
@@ -262,11 +264,29 @@ def evaluate_first_passage_risk(
     p_win_short = float((df_short["pnl"] > 0).mean())
     ev_short = float(df_short["pnl"].mean() - friction)
 
+    # Directional momentum filter against strong morning trends
+    clv = float(target_morning.get("morning_clv", 0.0))
+    ret_m = float(target_morning.get("ret_morning", 0.0))
+    allow_long = not (trend_filter and (clv < -0.5 and ret_m < -0.25))
+    allow_short = not (trend_filter and (clv > 0.5 and ret_m > 0.25))
+
+    # Strict first-passage dominance: TP first must outpace SL first
+    fp_dom_long = (
+        (p_hit_tp_long >= p_hit_sl_long) and (p_hit_tp_long / (p_hit_sl_long + 1e-9) >= 1.15)
+        if strict_fp
+        else True
+    )
+    fp_dom_short = (
+        (p_hit_tp_short >= p_hit_sl_short) and (p_hit_tp_short / (p_hit_sl_short + 1e-9) >= 1.15)
+        if strict_fp
+        else True
+    )
+
     # Decision policy: Require minimum win probability >= 55% and positive EV edge
     min_prob = 0.55
     min_edge = 0.5  # points net expected gain
 
-    if ev_long > ev_short and ev_long >= min_edge and p_win_long >= min_prob:
+    if allow_long and fp_dom_long and ev_long > ev_short and ev_long >= min_edge and p_win_long >= min_prob:
         action = "STRONG LONG"
         chosen_side = "LONG"
         confidence = p_win_long
@@ -274,10 +294,10 @@ def evaluate_first_passage_risk(
         target_price = morning_close + tp_pts
         stop_price = morning_close - sl_pts
         reason = (
-            f"Xác suất Win Long ({p_win_long*100:.1f}%) vượt ngưỡng {min_prob*100:.0f}%, "
-            f"P(Hit TP First)={p_hit_tp_long*100:.1f}%, EV ròng đạt {ev_long:+.2f} điểm."
+            f"Xác suất Win Long ({p_win_long*100:.1f}%) >= {min_prob*100:.0f}%, "
+            f"P(Hit TP First)={p_hit_tp_long*100:.1f}% >= P(Hit SL First)={p_hit_sl_long*100:.1f}%, EV ròng={ev_long:+.2f} pts."
         )
-    elif ev_short > ev_long and ev_short >= min_edge and p_win_short >= min_prob:
+    elif allow_short and fp_dom_short and ev_short > ev_long and ev_short >= min_edge and p_win_short >= min_prob:
         action = "STRONG SHORT"
         chosen_side = "SHORT"
         confidence = p_win_short
@@ -285,8 +305,8 @@ def evaluate_first_passage_risk(
         target_price = morning_close - tp_pts
         stop_price = morning_close + sl_pts
         reason = (
-            f"Xác suất Win Short ({p_win_short*100:.1f}%) vượt ngưỡng {min_prob*100:.0f}%, "
-            f"P(Hit TP First)={p_hit_tp_short*100:.1f}%, EV ròng đạt {ev_short:+.2f} điểm."
+            f"Xác suất Win Short ({p_win_short*100:.1f}%) >= {min_prob*100:.0f}%, "
+            f"P(Hit TP First)={p_hit_tp_short*100:.1f}% >= P(Hit SL First)={p_hit_sl_short*100:.1f}%, EV ròng={ev_short:+.2f} pts."
         )
     else:
         action = "WAIT / NO TRADE"
@@ -295,10 +315,17 @@ def evaluate_first_passage_risk(
         chosen_ev = max(ev_long, ev_short)
         target_price = morning_close
         stop_price = morning_close
-        reason = (
-            f"Kỳ vọng ròng chưa đủ lớn (EV Long={ev_long:+.2f}, EV Short={ev_short:+.2f}) "
-            f"hoặc xác suất Win chưa đạt ngưỡng an toàn {min_prob*100:.0f}%."
-        )
+        if not allow_short and ev_short > ev_long:
+            reason = f"Đứng ngoài: Phiên sáng tăng mạnh (Ret={ret_m:+.2f}%, CLV={clv:+.2f}) -> Chặn lệnh Short ngược xu hướng."
+        elif not allow_long and ev_long > ev_short:
+            reason = f"Đứng ngoài: Phiên sáng giảm mạnh (Ret={ret_m:+.2f}%, CLV={clv:+.2f}) -> Chặn lệnh Long ngược xu hướng."
+        elif (not fp_dom_long and ev_long >= ev_short) or (not fp_dom_short and ev_short > ev_long):
+            reason = "Đứng ngoài: Tỷ lệ chạm TP trước chưa đủ áp đảo so với chạm SL trước (rủi ro quét 2 đầu cao)."
+        else:
+            reason = (
+                f"Kỳ vọng ròng chưa đủ lớn (EV Long={ev_long:+.2f}, EV Short={ev_short:+.2f}) "
+                f"hoặc xác suất Win chưa đạt ngưỡng an toàn {min_prob*100:.0f}%."
+            )
 
     return {
         "target_day": target_day,
@@ -334,8 +361,11 @@ def run_predict(
     csv_path: str = None,
     train_csv: str = None,
     target_date: str = None,
-    tp: float = 7.0,
-    sl: float = 4.0,
+    tp: float = None,
+    sl: float = None,
+    use_atr: bool = True,
+    trend_filter: bool = True,
+    strict_fp: bool = True,
     k: int = 30,
     friction: float = 0.8,
 ) -> dict:
@@ -363,26 +393,41 @@ def run_predict(
 
     target_morning = df_mornings.loc[target_idx]
     morning_close = float(target_morning["close"])
+    morning_atr = float(target_morning["high"] - target_morning["low"])
+
+    # Determine dynamic ATR vs static TP/SL
+    if use_atr and (tp is None or sl is None):
+        eff_sl = max(6.0, round(morning_atr * 0.65, 1))
+        eff_tp = max(8.0, round(eff_sl * 1.25, 1))
+        barrier_mode = f"Động theo ATR ({morning_atr:.1f} pts) -> TP={eff_tp:.1f}, SL={eff_sl:.1f}"
+    else:
+        eff_sl = sl if sl is not None else 4.0
+        eff_tp = tp if tp is not None else 7.0
+        barrier_mode = f"Cố định -> TP={eff_tp:.1f}, SL={eff_sl:.1f}"
 
     print(f"\n📅 Ngày dự báo: {target_date} | Chốt dữ liệu sáng: 11:30:00")
     print(
         f"📊 Giá chốt sáng: {morning_close:.2f} | Open: {target_morning['open']:.2f} "
-        f"| High: {target_morning['high']:.2f} | Low: {target_morning['low']:.2f}"
+        f"| High: {target_morning['high']:.2f} | Low: {target_morning['low']:.2f} "
+        f"(ATR Sáng = {morning_atr:.1f} pts)"
     )
     print(
         f"⚡ Causal Fingerprint: Ret={target_morning['ret_morning']:+.2f}% | "
         f"VWAP Dev={target_morning['vwap_dev']:+.2f}% | Momentum 30p={target_morning['ret_last30m']:+.2f}% | "
         f"CLV={target_morning['morning_clv']:+.2f}"
     )
+    print(f"⚙️  Cấu hình dải rủi ro: {barrier_mode} | Bộ lọc Xu hướng: {'BẬT' if trend_filter else 'TẮT'}")
 
     eval_res = evaluate_first_passage_risk(
         df_mornings=df_mornings,
         df_all_5m=df_all_5m,
         target_idx=target_idx,
         k_neighbors=k,
-        tp_pts=tp,
-        sl_pts=sl,
+        tp_pts=eff_tp,
+        sl_pts=eff_sl,
         friction=friction,
+        trend_filter=trend_filter,
+        strict_fp=strict_fp,
     )
 
     lm = eval_res["long_metrics"]
@@ -391,12 +436,12 @@ def run_predict(
     print("\n" + "-" * 85)
     print(f"🎲 KẾT QUẢ MÔ PHỎNG QUỸ ĐẠO TỪ {eval_res['k_neighbors']} MẪU HÌNH TƯƠNG ĐỒNG NHẤT:")
     print(
-        f"   🟢 Kịch bản LONG  (TP = +{tp:.1f} pts, SL = -{sl:.1f} pts)  : "
+        f"   🟢 Kịch bản LONG  (TP = +{eff_tp:.1f} pts, SL = -{eff_sl:.1f} pts)  : "
         f"P(Hit TP First) = {lm['p_hit_tp']*100:5.1f}% | P(Hit SL First) = {lm['p_hit_sl']*100:5.1f}% "
         f"| P(Win) = {lm['p_win']*100:5.1f}% | EV = {lm['ev']:+5.2f} pts"
     )
     print(
-        f"   🔴 Kịch bản SHORT (TP = -{tp:.1f} pts, SL = +{sl:.1f} pts)  : "
+        f"   🔴 Kịch bản SHORT (TP = -{eff_tp:.1f} pts, SL = +{eff_sl:.1f} pts)  : "
         f"P(Hit TP First) = {sm['p_hit_tp']*100:5.1f}% | P(Hit SL First) = {sm['p_hit_sl']*100:5.1f}% "
         f"| P(Win) = {sm['p_win']*100:5.1f}% | EV = {sm['ev']:+5.2f} pts"
     )
@@ -419,8 +464,8 @@ def run_predict(
     if not aft_bars.empty:
         print("-" * 85)
         print("🔍 ĐỐI CHIẾU DIỄN BIẾN THỰC TẾ TRONG PHIÊN CHIỀU:")
-        act_long = simulate_first_passage_path(aft_bars, "LONG", tp, sl)
-        act_short = simulate_first_passage_path(aft_bars, "SHORT", tp, sl)
+        act_long = simulate_first_passage_path(aft_bars, "LONG", eff_tp, eff_sl)
+        act_short = simulate_first_passage_path(aft_bars, "SHORT", eff_tp, eff_sl)
 
         last_bar = aft_bars.iloc[-1]
         print(
@@ -450,8 +495,11 @@ def run_evaluate(
     train_csv: str = None,
     test_csv: str = None,
     n_days: int = None,
-    tp: float = 7.0,
-    sl: float = 4.0,
+    tp: float = None,
+    sl: float = None,
+    use_atr: bool = True,
+    trend_filter: bool = True,
+    strict_fp: bool = True,
     k: int = 30,
     friction: float = 0.8,
     output_csv: str = None,
@@ -475,8 +523,9 @@ def run_evaluate(
         test_days = test_days[-n_days:]
 
     total_test = len(test_days)
+    mode_str = "Dynamic ATR (0.65x ATR SL, 1.25x TP)" if (use_atr and (tp is None or sl is None)) else f"Fixed TP={tp}, SL={sl}"
     print(f"Kiểm thử trên {total_test} phiên: {test_days[0]} -> {test_days[-1]}")
-    print(f"Cấu hình: TP = +{tp:.1f} pts | SL = -{sl:.1f} pts | K = {k} | Ma sát = {friction:.1f} pts\n")
+    print(f"Cấu hình: {mode_str} | K = {k} | Trend Filter: {'BẬT' if trend_filter else 'TẮT'} | Ma sát = {friction:.1f} pts\n")
 
     records = []
     for i, day in enumerate(test_days):
@@ -484,16 +533,27 @@ def run_evaluate(
         if matching.empty:
             continue
         idx = matching.index[0]
-        morning_close = float(df_mornings.loc[idx, "close"])
+        target_row = df_mornings.loc[idx]
+        morning_close = float(target_row["close"])
+        morning_atr = float(target_row["high"] - target_row["low"])
+
+        if use_atr and (tp is None or sl is None):
+            eff_sl = max(6.0, round(morning_atr * 0.65, 1))
+            eff_tp = max(8.0, round(eff_sl * 1.25, 1))
+        else:
+            eff_sl = sl if sl is not None else 4.0
+            eff_tp = tp if tp is not None else 7.0
 
         pred = evaluate_first_passage_risk(
             df_mornings=df_mornings,
             df_all_5m=df_all_5m,
             target_idx=idx,
             k_neighbors=k,
-            tp_pts=tp,
-            sl_pts=sl,
+            tp_pts=eff_tp,
+            sl_pts=eff_sl,
             friction=friction,
+            trend_filter=trend_filter,
+            strict_fp=strict_fp,
         )
 
         df_day_5m = df_all_5m[df_all_5m["Day_str"] == day]
@@ -505,12 +565,12 @@ def run_evaluate(
 
         if not aft_bars.empty:
             if pred["chosen_side"] == "LONG":
-                act_res = simulate_first_passage_path(aft_bars, "LONG", tp, sl)
+                act_res = simulate_first_passage_path(aft_bars, "LONG", eff_tp, eff_sl)
                 actual_outcome = act_res["outcome"]
                 actual_pnl = act_res["pnl"]
                 net_pnl = actual_pnl - friction
             elif pred["chosen_side"] == "SHORT":
-                act_res = simulate_first_passage_path(aft_bars, "SHORT", tp, sl)
+                act_res = simulate_first_passage_path(aft_bars, "SHORT", eff_tp, eff_sl)
                 actual_outcome = act_res["outcome"]
                 actual_pnl = act_res["pnl"]
                 net_pnl = actual_pnl - friction
@@ -523,6 +583,8 @@ def run_evaluate(
         records.append({
             "day": day,
             "morning_close": morning_close,
+            "tp_pts": eff_tp,
+            "sl_pts": eff_sl,
             "action": pred["action"],
             "chosen_side": pred["chosen_side"],
             "confidence": pred["confidence"],
@@ -650,14 +712,24 @@ def main():
     parser.add_argument(
         "--tp",
         type=float,
-        default=7.0,
-        help="Ngưỡng Chốt lời (Take Profit) tính theo điểm phái sinh (mặc định 7.0)",
+        default=None,
+        help="Ngưỡng Chốt lời (Take Profit) tính theo điểm. Nếu bỏ trống, tự động tính theo Dynamic ATR.",
     )
     parser.add_argument(
         "--sl",
         type=float,
-        default=4.0,
-        help="Ngưỡng Cắt lỗ (Stop Loss) tính theo điểm phái sinh (mặc định 4.0)",
+        default=None,
+        help="Ngưỡng Cắt lỗ (Stop Loss) tính theo điểm. Nếu bỏ trống, tự động tính theo Dynamic ATR.",
+    )
+    parser.add_argument(
+        "--no-atr",
+        action="store_true",
+        help="Tắt tính toán động theo ATR, ép buộc sử dụng giá trị cố định (mặc định TP=7.0, SL=4.0)",
+    )
+    parser.add_argument(
+        "--no-trend-filter",
+        action="store_true",
+        help="Tắt bộ lọc xu hướng sáng (cho phép bắt đỉnh/đáy ngược xu hướng)",
     )
     parser.add_argument(
         "--k",
@@ -679,6 +751,9 @@ def main():
 
     args = parser.parse_args()
 
+    use_atr = not args.no_atr and (args.tp is None or args.sl is None)
+    trend_filter = not args.no_trend_filter
+
     if args.mode == "predict":
         run_predict(
             csv_path=args.csv,
@@ -686,6 +761,8 @@ def main():
             target_date=args.date,
             tp=args.tp,
             sl=args.sl,
+            use_atr=use_atr,
+            trend_filter=trend_filter,
             k=args.k,
             friction=args.friction,
         )
@@ -696,6 +773,8 @@ def main():
             n_days=args.days,
             tp=args.tp,
             sl=args.sl,
+            use_atr=use_atr,
+            trend_filter=trend_filter,
             k=args.k,
             friction=args.friction,
             output_csv=args.output_csv,
@@ -704,3 +783,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
