@@ -4,17 +4,23 @@ Data Resampling & Causal Feature Engineering for VN30F1M Half-Day Trading.
 import pandas as pd
 import numpy as np
 
-def load_and_resample_halfday(csv_path: str, max_days: int = None) -> tuple[pd.DataFrame, pd.DataFrame]:
+def load_and_resample_halfday(csv_path, max_days: int = None) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
-    Reads 5-minute VN30F1M CSV, splits into Morning (09:00-11:30) and Afternoon (13:00-14:45),
-    aggregates OHLCV, and extracts causal stationary features.
+    Reads 5-minute VN30F1M CSV (or list of CSVs / DataFrame), splits into Morning (09:00-11:30)
+    and Afternoon (13:00-14:45), aggregates OHLCV, and extracts causal stationary features.
     """
-    df = pd.read_csv(csv_path)
+    if isinstance(csv_path, pd.DataFrame):
+        df = csv_path.copy()
+    elif isinstance(csv_path, (list, tuple)):
+        dfs = [pd.read_csv(p) for p in csv_path if p]
+        df = pd.concat(dfs, ignore_index=True)
+    else:
+        df = pd.read_csv(csv_path)
     df.columns = [c.strip().lower() for c in df.columns]
-    
-    # Parse timestamp
+
+    # Parse timestamp and deduplicate
     df['date'] = pd.to_datetime(df['date'])
-    df = df.sort_values('date').reset_index(drop=True)
+    df = df.sort_values('date').drop_duplicates(subset=['date'], keep='last').reset_index(drop=True)
     
     # Extract time components
     df['time_str'] = df['date'].dt.strftime('%H:%M:%S')
@@ -48,6 +54,12 @@ def load_and_resample_halfday(csv_path: str, max_days: int = None) -> tuple[pd.D
         vol_price_sum = grp['vol_price'].sum()
         vwap_val = vol_price_sum / (vol_sum + 1e-9)
         
+        if session == 'morning':
+            sub_1100 = grp[grp['time_str'] <= '11:00:00']
+            close_1100 = sub_1100.iloc[-1]['close'] if not sub_1100.empty else open_val
+        else:
+            close_1100 = close_val
+
         records.append({
             'day_str': day_str,
             'session': session,
@@ -56,6 +68,7 @@ def load_and_resample_halfday(csv_path: str, max_days: int = None) -> tuple[pd.D
             'high': high_val,
             'low': low_val,
             'close': close_val,
+            'close_1100': close_1100,
             'volume': vol_sum,
             'vwap': vwap_val,
         })
@@ -78,31 +91,85 @@ def load_and_resample_halfday(csv_path: str, max_days: int = None) -> tuple[pd.D
             chosen_days = unique_days[-max_days:]
             df_halfday = df_halfday[df_halfday['day_str'].isin(chosen_days)].reset_index(drop=True)
             
-    # Calculate Causal Morning Features
+    # Calculate Causal Morning & Inter-Session Features (9 features total)
     morning_mask = df_halfday['session'] == 'morning'
+    afternoon_mask = df_halfday['session'] == 'afternoon'
 
-    # Morning Return
+    # 1. Morning Return (%)
     df_halfday.loc[morning_mask, 'ret_morning'] = (
         (df_halfday.loc[morning_mask, 'close'] - df_halfday.loc[morning_mask, 'open'])
         / (df_halfday.loc[morning_mask, 'open'] + 1e-9)
-    )
-    # Morning Normalized Range
+    ) * 100.0
+
+    # 2. Morning Normalized Range (%)
     df_halfday.loc[morning_mask, 'norm_atr'] = (
         (df_halfday.loc[morning_mask, 'high'] - df_halfday.loc[morning_mask, 'low'])
         / (df_halfday.loc[morning_mask, 'close'] + 1e-9)
-    )
-    # VWAP deviation
+    ) * 100.0
+
+    # 3. VWAP deviation (%)
     df_halfday.loc[morning_mask, 'vwap_dev'] = (
         (df_halfday.loc[morning_mask, 'close'] - df_halfday.loc[morning_mask, 'vwap'])
         / (df_halfday.loc[morning_mask, 'vwap'] + 1e-9)
-    )
-    # Volume MA 10
+    ) * 100.0
+
+    # 4. Volume MA 10 Ratio
     morning_vols = df_halfday.loc[morning_mask, 'volume']
     vol_ma10 = morning_vols.rolling(10, min_periods=1).mean()
     df_halfday.loc[morning_mask, 'vol_ratio'] = morning_vols / (vol_ma10 + 1e-9)
-    
+
+    # 5. Late-Morning 30-Minute Momentum: 11:00 -> 11:30 (%)
+    df_halfday.loc[morning_mask, 'ret_last30m'] = (
+        (df_halfday.loc[morning_mask, 'close'] - df_halfday.loc[morning_mask, 'close_1100'])
+        / (df_halfday.loc[morning_mask, 'close_1100'] + 1e-9)
+    ) * 100.0
+
+    # 6. Morning Close Location Value (CLV in [-1, +1])
+    df_halfday.loc[morning_mask, 'morning_clv'] = (
+        (df_halfday.loc[morning_mask, 'close'] - df_halfday.loc[morning_mask, 'low'])
+        - (df_halfday.loc[morning_mask, 'high'] - df_halfday.loc[morning_mask, 'close'])
+    ) / (df_halfday.loc[morning_mask, 'high'] - df_halfday.loc[morning_mask, 'low'] + 1e-9)
+
+    # 7-9. Inter-Session Lagged Features (strictly causal at 11:30 AM of day t)
+    morning_opens = df_halfday.loc[morning_mask, 'open'].to_numpy(dtype=float)
+    morning_closes = df_halfday.loc[morning_mask, 'close'].to_numpy(dtype=float)
+    afternoon_closes = df_halfday.loc[afternoon_mask, 'close'].to_numpy(dtype=float)
+    ret_morning_vals = df_halfday.loc[morning_mask, 'ret_morning'].to_numpy(dtype=float)
+
+    # 7. Overnight Gap (%): Morning Open(t) vs Afternoon Close(t-1)
+    prev_aft_close = np.roll(afternoon_closes, 1)
+    overnight_gap = ((morning_opens - prev_aft_close) / (prev_aft_close + 1e-9)) * 100.0
+    if len(overnight_gap) > 0:
+        overnight_gap[0] = 0.0
+    df_halfday.loc[morning_mask, 'overnight_gap'] = overnight_gap
+
+    # 8. Previous Day's Afternoon Return (%): Afternoon Close(t-1) vs Morning Close(t-1)
+    aft_ret_all = ((afternoon_closes - morning_closes) / (morning_closes + 1e-9)) * 100.0
+    prev_afternoon_ret = np.roll(aft_ret_all, 1)
+    if len(prev_afternoon_ret) > 0:
+        prev_afternoon_ret[0] = 0.0
+    df_halfday.loc[morning_mask, 'prev_afternoon_ret'] = prev_afternoon_ret
+
+    # 9. Previous Day's Morning Return (%): ret_morning(t-1)
+    prev_ret_morning = np.roll(ret_morning_vals, 1)
+    if len(prev_ret_morning) > 0:
+        prev_ret_morning[0] = 0.0
+    df_halfday.loc[morning_mask, 'prev_ret_morning'] = prev_ret_morning
+
+    feature_cols = [
+        'ret_morning',
+        'norm_atr',
+        'vwap_dev',
+        'vol_ratio',
+        'ret_last30m',
+        'morning_clv',
+        'overnight_gap',
+        'prev_afternoon_ret',
+        'prev_ret_morning',
+    ]
+
     # Forward fill morning features to afternoon bar of the same day so afternoon has morning's context
-    for feat in ['ret_morning', 'norm_atr', 'vwap_dev', 'vol_ratio']:
+    for feat in feature_cols:
         df_halfday[feat] = df_halfday[feat].ffill().bfill()
         
     # Build AutoTS-ready sequential DataFrame
@@ -112,9 +179,7 @@ def load_and_resample_halfday(csv_path: str, max_days: int = None) -> tuple[pd.D
     
     df_features = pd.DataFrame(index=step_dates)
     df_features['VN30F1M'] = df_halfday['close'].values
-    df_features['ret_morning'] = df_halfday['ret_morning'].values
-    df_features['norm_atr'] = df_halfday['norm_atr'].values
-    df_features['vwap_dev'] = df_halfday['vwap_dev'].values
-    df_features['vol_ratio'] = df_halfday['vol_ratio'].values
+    for feat in feature_cols:
+        df_features[feat] = df_halfday[feat].values
     
     return df_halfday, df_features
